@@ -1,0 +1,11 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
+protocol = { path = "../protocol" }
+scheduler = { path = "../scheduler" }
+
