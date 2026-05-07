@@ -1,4 +1,4 @@
-# AGENTS.md
+# CLAUDE.md
 
 ## Purpose
 Learning Rust and AI Infra: Using Rust to build a production level inference framework, mainly focus on:
@@ -18,4 +18,3 @@ When user REALLY ASK YOU TO FINISH THE WHOLE THING, you can straight up finish i
 - Don't over obstraction
 - Code is Doc, add necessary comments and explaination to core codes. The code itself should explain everything
 - Simplicity First, simple is not easy.
-
