@@ -12,11 +12,42 @@ Queued -> Active -> (Finished / Aborted / Failed)
 struct Request {
     request_id: RequestId,
     prompt: String,
-    state: RequestState,  // Queued | Active | Finished | Aborted | Failed
+    state: RequestState,      // Queued | Active | Finished | Aborted | Failed
+    sampling_params: SamplingParams,
 }
 ```
 
-## Protocol (Scheduler <-> Engine)
+## Protocol (Scheduler <-> Engine 通信契约)
+
+Protocol crate 只放**最小公共类型**，不放业务逻辑对象。
+
+```Rust
+// 基础类型
+type RequestId = u64;
+type TokenId  = u32;
+
+struct Token { token_id: TokenId }
+
+struct Vocab {
+    vocab_size: Option<u32>,
+    vocab: HashMap<u32, String>,
+    eos_token_id: TokenId,
+}
+
+#[async_trait]
+trait Tokenizer {
+    async fn tokenize(&self, prompt: &str) -> Vec<Token>;
+    async fn decode(&self, input_ids: &Vec<Token>) -> String;
+}
+```
+
+### Crate 依赖关系
+
+```
+        protocol  (最小公共契约)
+       /        \
+  scheduler    engine   (engine 不反向依赖 scheduler)
+```
 
 ```Rust
 // Scheduler 组织 batch 发送到 Engine
@@ -28,13 +59,13 @@ struct RequestBatch {
 
 // EngineTask 按阶段拆分
 enum EngineTask {
-    Prefill  { request_id, input_tokens: Vec<TokenId> },
-    Decode   { request_id, input_tokens: Vec<TokenId> },
+    Prefill { request_id, input_tokens: Vec<TokenId> },
+    Decode  { request_id, input_tokens: Vec<TokenId>, kv: KVCache },
 }
 
 // Scheduler -> Engine
 enum EngineCommand {
-    ExecuteStep(EngineTask),
+    ExecuteStep(RequestBatch),  // 一次调度一个 batch
     Shutdown,
 }
 
@@ -48,7 +79,7 @@ struct SequenceOutput {
     seq_id: RequestId,
     token: TokenId,
     kv: KVCache,
-    state: SequenceState,  // Running | Finished(FinishReason) | Error
+    error: Option<String>,  // Engine 只报告执行错误，不做状态判断
 }
 ```
 
@@ -65,12 +96,12 @@ trait Engine: Send + Sync {
 
 ### MockEngine 实现
 
-- 内部持有 `MockModel` + `MockTokenizer`
+- 内部持有 `MockModel`
 - `execute_step` 按 `Prefill` / `Decode` 自动分区、分别执行
 - `prefill`: 调用 `model.forward(input_tokens, None)` → 产出首 token + KVCache
 - `decode`:  调用 `model.forward(last_token, Some(kv))` → 产出 next token
 - 每个 task 独立调用 model（TODO: 合并为一次 batch forward）
-- 根据 eos_token_id 检测 `SequenceState`
+- **Engine 只输出 token + kv + error，不做 SequenceState 判断**
 
 ### Model Layer
 
@@ -89,33 +120,60 @@ enum ModelOutput {
 
 ## Scheduler
 
-```Rust
-pub struct Scheduler {
-    request_rx: Receiver<Request>,          // 外部请求入口
-    engine_cmd_tx: Sender<EngineCommand>,   // -> Engine
-    engine_result_rx: Receiver<EngineResult>, // <- Engine
+Scheduler 维护 `Sequence` 状态机，拥有请求从接入到完成的完整生命周期。
 
-    queued:   Vec<Request>,   // 待调度
-    active:   Vec<Request>,   // 已 Prefill，进入 Decode 阶段
-    finished: Vec<Request>,   // 终态
+```Rust
+pub struct Sequence {
+    request_id: RequestId,
+    prompt: String,
+    sampling_params: SamplingParams,
+
+    state: SequenceState,        // WaitingPrefill | WaitingDecode | RunningPrefill | RunningDecode | Finished | Error
+    input_tokens: Vec<TokenId>,  // tokenize 后的输入
+    output_tokens: Vec<TokenId>, // 已生成的 token
+    kv_cache: Option<KVCache>,   // Engine 返回的 KV
+}
+
+pub struct Scheduler {
+    request_rx: Receiver<Request>,
+    engine_cmd_tx: Sender<EngineCommand>,
+    engine_result_rx: Receiver<EngineResult>,
+
+    sequences: HashMap<RequestId, Sequence>,  // 统一维护所有序列状态
 }
 ```
 
 ### 主循环
 
 ```Rust
-async fn run(mut self) {
+async fn run(mut self, tokenizer: &dyn Tokenizer) {
     loop {
         tokio::select! {
-            Some(req)    = self.request_rx.recv()      => self.queued.push(req),
-            Some(result) = self.engine_result_rx.recv() => self.handle_engine_result(result).await,
+            Some(req) = self.request_rx.recv() => {
+                let seq = Sequence::from_request(req, tokenizer).await;
+                self.sequences.insert(seq.request_id, seq);
+            }
+            Some(result) = self.engine_result_rx.recv() => {
+                self.handle_engine_result(result).await;
+            }
         }
-        self.schedule().await;  // 检查状态 -> build_batch -> 派发 EngineTask -> 更新 State
+        self.schedule().await;  // build batch -> 派发 -> 更新 State
     }
 }
 ```
 
-> Scheduler 拥有 State 的管理权并进行状态迁移；Engine 只负责产出 token，做 Prefill / Decode 执行。
+### 职责边界
+
+| 职责 | Scheduler | Engine |
+|------|-----------|--------|
+| Tokenize | ✅ | ❌ |
+| Forward | ❌ | ✅ |
+| 状态判断 (eos / max_tokens) | ✅ | ❌ |
+| KV Cache 物理存储 | ❌ | ✅ |
+| KV Cache 调度记账 | ✅ | ❌ |
+| Batch 组装 | ✅ | ❌ |
+
+> Scheduler 拥有 State 的管理权并进行状态迁移；Engine 只负责无状态计算，产出 raw token + kv + error。
 
 ## Metrics
 

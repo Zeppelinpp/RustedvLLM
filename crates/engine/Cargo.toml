@@ -7,5 +7,4 @@ edition = "2024"
 tokio = { workspace = true }
 async-trait = { workspace = true }
 protocol = { path = "../protocol" }
-scheduler = { path = "../scheduler" }
 

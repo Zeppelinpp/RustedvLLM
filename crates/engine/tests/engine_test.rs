@@ -1,24 +1,19 @@
 use engine::{
     engine::{Engine, MockEngine},
-    model::{MockModel, MockTokenizer, Vocab},
+    model::MockModel,
 };
-use protocol::types::{EngineResult, EngineTask, RequestBatch, SequenceState};
+use protocol::types::{EngineResult, EngineTask, RequestBatch};
 
 #[tokio::test]
 async fn test_prefill_batch() {
     let model = "MockModel".to_string();
-    let tokenizer = MockTokenizer {
-        vocab: Vocab::default(),
-    };
     let mock_model = MockModel {
         model: model.clone(),
-        tokenizer: tokenizer.clone(),
     };
 
     let mock_engine = MockEngine {
         id: model.clone(),
         model: mock_model.clone(),
-        tokenizer: tokenizer.clone(),
     };
 
     // Batch
@@ -49,10 +44,6 @@ async fn test_prefill_batch() {
     };
 
     assert_eq!(outputs.len(), 3);
-    assert!(
-        outputs
-            .iter()
-            .all(|o| matches!(o.state, SequenceState::Running))
-    );
+    assert!(outputs.iter().all(|o| o.error.is_none()));
     assert!(outputs.iter().all(|o| o.token == 33));
 }

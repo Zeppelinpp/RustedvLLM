@@ -1,50 +1,57 @@
-use std::ops::Deref;
-
-// Received -> Tokenize -> Prefill -> Output -> Finish or Decode
-use crate::model::{
-    self, DecodeResult, MockModel, MockTokenizer, Model, ModelOutput, PrefillResult, Token,
-    Tokenizer,
-};
+use crate::model::{DecodeResult, MockModel, Model, ModelOutput, PrefillResult};
 use async_trait::async_trait;
 use protocol::types::{
-    EngineResult, EngineTask, FinishReason, KVCache, Request, RequestBatch, RequestId,
-    RequestState, SequenceOutput, SequenceState, TokenId,
+    EngineResult, EngineTask, KVCache, RequestBatch, SequenceOutput, Token, Vocab,
 };
 
 #[async_trait]
 pub trait Engine: Send + Sync {
-    // execute_step: Engine decide to prefill/decode base on the request state
-    // return stepoutput: token
     async fn execute_step(&self, batch: &RequestBatch) -> EngineResult;
+}
+
+#[derive(Clone)]
+pub struct MockTokenizer {
+    pub vocab: Vocab,
+}
+
+fn parse_vocab(_vocab_path: &str) -> Vocab {
+    Vocab::default()
+}
+
+impl MockTokenizer {
+    pub fn new(vocab_path: &str) -> Self {
+        MockTokenizer {
+            vocab: parse_vocab(vocab_path),
+        }
+    }
+}
+
+#[async_trait]
+impl protocol::types::Tokenizer for MockTokenizer {
+    async fn decode(&self, _input_ids: &Vec<Token>) -> String {
+        todo!()
+    }
+    async fn tokenize(&self, _prompt: &str) -> Vec<Token> {
+        todo!()
+    }
 }
 
 pub struct MockEngine {
     pub id: String,
     pub model: MockModel,
-    pub tokenizer: MockTokenizer,
 }
 
 impl MockEngine {
-    fn new(id: &str, model: &MockModel, tokenizer: &MockTokenizer) -> Self {
+    pub fn new(id: &str, model: &MockModel) -> Self {
         MockEngine {
             id: id.to_string(),
             model: model.clone(),
-            tokenizer: tokenizer.clone(),
-        }
-    }
-    fn get_state(&self, token: TokenId) -> SequenceState {
-        if token == self.model.tokenizer.vocab.eos_token_id {
-            SequenceState::Finished(FinishReason::Finished)
-        } else {
-            SequenceState::Running
         }
     }
 
     async fn prefill(&self, tasks: &[&EngineTask]) -> EngineResult {
         let mut outputs = Vec::with_capacity(tasks.len());
 
-        // TODO: 真正引擎应把所有 prefill tasks 合并成一次 batch forward，
-        // 而不是逐个调用 model.forward。
         for task in tasks {
             let EngineTask::Prefill {
                 request_id,
@@ -60,28 +67,25 @@ impl MockEngine {
                     input_tokens
                         .iter()
                         .map(|t| Token { token_id: *t })
-                        .collect::<Vec<Token>>(),
+                        .collect(),
                     None,
                 )
                 .await;
 
             if let ModelOutput::PrefillResult(PrefillResult { first_token, kv }) = model_output {
-                // TODO: 集成 get_state 做 EOS 检测，更新 SequenceState
-                let sequence_output = SequenceOutput {
+                outputs.push(SequenceOutput {
                     seq_id: *request_id,
                     token: first_token.token_id,
-                    kv: kv,
-                    state: self.get_state(first_token.token_id),
-                };
-                outputs.push(sequence_output);
+                    kv,
+                    error: None,
+                });
             } else {
-                // TODO: 部分失败时，应把错误记录到对应 sequence，而不是让整个 batch 失败
                 outputs.push(SequenceOutput {
                     seq_id: *request_id,
                     token: Token::default().token_id,
                     kv: KVCache::default(),
-                    state: SequenceState::Error,
-                })
+                    error: Some("prefill failed".to_string()),
+                });
             }
         }
 
@@ -91,20 +95,16 @@ impl MockEngine {
     async fn decode(&self, tasks: &[&EngineTask]) -> EngineResult {
         let mut outputs = Vec::with_capacity(tasks.len());
 
-        // TODO: 真正引擎应把所有 decode tasks 合并成一次 batch forward。
         for task in tasks {
             let EngineTask::Decode {
                 request_id,
                 input_tokens,
+                kv,
             } = task
             else {
                 continue;
             };
 
-            // TODO: KV Cache 应该从 prefill 或上一步 decode 传递过来，
-            // 而不是每次都新建 default。
-            // 暂时保留 Mock
-            let mock_kv = KVCache::default();
             let last_token = vec![
                 input_tokens
                     .iter()
@@ -114,24 +114,22 @@ impl MockEngine {
                     .unwrap_or(&Token::default())
                     .clone(),
             ];
-            let model_output = self.model.forward(last_token, Some(mock_kv)).await;
+            let model_output = self.model.forward(last_token, Some(kv.clone())).await;
 
             if let ModelOutput::DecodeResult(DecodeResult { new_token, kv }) = model_output {
-                // TODO: 集成 get_state 做 EOS 检测，更新 SequenceState
-                let sequence_output = SequenceOutput {
+                outputs.push(SequenceOutput {
                     seq_id: *request_id,
                     token: new_token.token_id,
-                    kv: kv,
-                    state: self.get_state(new_token.token_id),
-                };
-                outputs.push(sequence_output);
+                    kv,
+                    error: None,
+                });
             } else {
                 outputs.push(SequenceOutput {
                     seq_id: *request_id,
                     token: Token::default().token_id,
                     kv: KVCache::default(),
-                    state: SequenceState::Error,
-                })
+                    error: Some("decode failed".to_string()),
+                });
             }
         }
 
