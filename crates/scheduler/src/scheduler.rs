@@ -5,7 +5,7 @@ use protocol::types::{
 use std::collections::HashMap;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Sequence {
     pub request_id: RequestId,
     pub prompt: String,
@@ -83,7 +83,7 @@ impl Scheduler {
                 }
 
                 Some(result) = self.engine_result_rx.recv() => {
-                    self.handle_engine_result(result).await;
+                    self.handle_engine_result(result, tokenizer).await;
                 }
             }
 
@@ -91,7 +91,7 @@ impl Scheduler {
         }
     }
 
-    async fn handle_engine_result(&mut self, result: EngineResult) {
+    async fn handle_engine_result(&mut self, result: EngineResult, tokenizer: &dyn Tokenizer) {
         let EngineResult::StepOutput { outputs } = result else {
             return;
         };
@@ -109,8 +109,8 @@ impl Scheduler {
             seq.output_tokens.push(output.token);
             seq.kv_cache = Some(output.kv);
 
-            let eos_token_id = 0; // TODO: get from tokenizer
-            let max_tokens = 100; // TODO: from sampling_params
+            let eos_token_id = tokenizer.eos_token_id();
+            let max_tokens = seq.sampling_params.max_tokens;
 
             if output.token == eos_token_id || seq.output_tokens.len() >= max_tokens {
                 seq.state = SequenceState::Finished(FinishReason::Finished);
@@ -155,6 +155,9 @@ impl Scheduler {
             tasks,
         };
 
-        let _ = self.engine_cmd_tx.send(EngineCommand::ExecuteStep(batch)).await;
+        let _ = self
+            .engine_cmd_tx
+            .send(EngineCommand::ExecuteStep(batch))
+            .await;
     }
 }

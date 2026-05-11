@@ -17,7 +17,7 @@ struct Request {
 }
 ```
 
-## Protocol (Scheduler <-> Engine 通信契约)
+## Protocol (Scheduler <-> Engine 通信)
 
 Protocol crate 只放**最小公共类型**，不放业务逻辑对象。
 
@@ -44,7 +44,7 @@ trait Tokenizer {
 ### Crate 依赖关系
 
 ```
-        protocol  (最小公共契约)
+        protocol  (中间数据交互类型定义)
        /        \
   scheduler    engine   (engine 不反向依赖 scheduler)
 ```
@@ -103,7 +103,7 @@ trait Engine: Send + Sync {
 - 每个 task 独立调用 model（TODO: 合并为一次 batch forward）
 - **Engine 只输出 token + kv + error，不做 SequenceState 判断**
 
-### Model Layer
+### Model Trait
 
 ```Rust
 #[async_trait]
@@ -161,17 +161,6 @@ async fn run(mut self, tokenizer: &dyn Tokenizer) {
     }
 }
 ```
-
-### 职责边界
-
-| 职责 | Scheduler | Engine |
-|------|-----------|--------|
-| Tokenize | ✅ | ❌ |
-| Forward | ❌ | ✅ |
-| 状态判断 (eos / max_tokens) | ✅ | ❌ |
-| KV Cache 物理存储 | ❌ | ✅ |
-| KV Cache 调度记账 | ✅ | ❌ |
-| Batch 组装 | ✅ | ❌ |
 
 > Scheduler 拥有 State 的管理权并进行状态迁移；Engine 只负责无状态计算，产出 raw token + kv + error。
 

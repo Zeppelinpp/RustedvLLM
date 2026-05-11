@@ -1,7 +1,7 @@
 use crate::model::{DecodeResult, MockModel, Model, ModelOutput, PrefillResult};
 use async_trait::async_trait;
 use protocol::types::{
-    EngineResult, EngineTask, KVCache, RequestBatch, SequenceOutput, Token, Vocab,
+    EngineResult, EngineTask, KVCache, RequestBatch, SequenceOutput, Token, TokenId, Vocab,
 };
 
 #[async_trait]
@@ -33,6 +33,9 @@ impl protocol::types::Tokenizer for MockTokenizer {
     }
     async fn tokenize(&self, _prompt: &str) -> Vec<Token> {
         todo!()
+    }
+    fn eos_token_id(&self) -> TokenId {
+        self.vocab.eos_token_id
     }
 }
 

@@ -40,8 +40,10 @@ pub struct RequestBatch {
     pub tasks: Vec<EngineTask>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SamplingParams {}
+#[derive(Debug, Clone, Default)]
+pub struct SamplingParams {
+    pub max_tokens: usize,
+}
 
 #[derive(Default, Debug, Clone)]
 pub struct KVCache {
@@ -58,11 +60,14 @@ pub enum FinishReason {
 pub trait Tokenizer {
     async fn tokenize(&self, prompt: &str) -> Vec<Token>;
     async fn decode(&self, input_ids: &Vec<Token>) -> String;
+
+    fn eos_token_id(&self) -> TokenId;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum SequenceState {
     // Scheduler
+    #[default]
     WaitingPrefill,
     WaitingDecode,
 
