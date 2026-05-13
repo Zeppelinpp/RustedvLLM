@@ -12,7 +12,7 @@ pub struct Token {
 #[derive(Debug, Clone)]
 pub enum RequestState {
     Queued,
-    Acitve,
+    Active,
     Finished,
     Aborted,
     Failed,
@@ -57,7 +57,7 @@ pub enum FinishReason {
 }
 
 #[async_trait]
-pub trait Tokenizer {
+pub trait Tokenizer: Send + Sync {
     async fn tokenize(&self, prompt: &str) -> Vec<Token>;
     async fn decode(&self, input_ids: &Vec<Token>) -> String;
 

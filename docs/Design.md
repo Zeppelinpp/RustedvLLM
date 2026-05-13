@@ -35,7 +35,7 @@ struct Vocab {
 }
 
 #[async_trait]
-trait Tokenizer {
+trait Tokenizer: Send + Sync { // Tokenizer被Scheduler使用，随 tokio::spawn 调用,Future需要实现 Send + 'static
     async fn tokenize(&self, prompt: &str) -> Vec<Token>;
     async fn decode(&self, input_ids: &Vec<Token>) -> String;
 }
@@ -134,44 +134,74 @@ pub struct Sequence {
     kv_cache: Option<KVCache>,   // Engine 返回的 KV
 }
 
-pub struct Scheduler {
-    request_rx: Receiver<Request>,
-    engine_cmd_tx: Sender<EngineCommand>,
-    engine_result_rx: Receiver<EngineResult>,
+impl Sequence {
+    async fn from_request(req: Request, tokenizer: &Box<dyn Tokenizer + Send>) -> Self {
+        let tokens = tokenizer.tokenize(&req.prompt).await;
+        let input_tokens = tokens.into_iter().map(|t| t.token_id).collect();
 
-    sequences: HashMap<RequestId, Sequence>,  // 统一维护所有序列状态
+        Sequence {
+            request_id: req.request_id,
+            prompt: req.prompt,
+            sampling_params: req.sampling_params,
+            state: SequenceState::WaitingPrefill,
+            input_tokens,
+            output_tokens: Vec::new(),
+            kv_cache: None,
+        }
+    }
+}
+
+pub struct Scheduler {
+    pub request_rx: Receiver<Request>,
+    pub engine_cmd_tx: Sender<EngineCommand>,
+    pub engine_result_rx: Receiver<EngineResult>,
+
+    pub sequences: HashMap<RequestId, Sequence>,  // 统一维护所有序列状态
+    pub tokenizer: Box<dyn Tokenizer + Send>,     // 随 Scheduler 拥有，满足 'static
+    shutdown_rx: Receiver<()>,                    // Gracefully shutdown
 }
 ```
 
 ### 主循环
 
 ```Rust
-async fn run(mut self, tokenizer: &dyn Tokenizer) {
+pub async fn run(mut self) -> Self {
     loop {
         tokio::select! {
+            biased;
+
+            Some(()) = self.shutdown_rx.recv() => {
+                break;
+            }
+
             Some(req) = self.request_rx.recv() => {
-                let seq = Sequence::from_request(req, tokenizer).await;
+                let seq = Sequence::from_request(req, &self.tokenizer).await;
                 self.sequences.insert(seq.request_id, seq);
             }
+
             Some(result) = self.engine_result_rx.recv() => {
                 self.handle_engine_result(result).await;
             }
         }
+
         self.schedule().await;  // build batch -> 派发 -> 更新 State
     }
+    self
 }
 ```
 
 > Scheduler 拥有 State 的管理权并进行状态迁移；Engine 只负责无状态计算，产出 raw token + kv + error。
 
-## Metrics
+## Metrics (TODO)
+
+以下 metrics 尚未实现，仅作为设计预留：
 
 ```Rust
 struct RequestMetrics {
-    queue_time,
-    ttft,
-    tpot,
-    total_latency,
+    queue_time: Duration,
+    ttft: Duration,           // Time To First Token
+    tpot: Duration,           // Time Per Output Token
+    total_latency: Duration,
 }
 ```
 

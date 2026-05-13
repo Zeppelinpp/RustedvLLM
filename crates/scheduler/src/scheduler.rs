@@ -10,17 +10,14 @@ pub struct Sequence {
     pub request_id: RequestId,
     pub prompt: String,
     pub sampling_params: SamplingParams,
-
     pub state: SequenceState,
-
     pub input_tokens: Vec<TokenId>,
     pub output_tokens: Vec<TokenId>,
-
     pub kv_cache: Option<KVCache>,
 }
 
 impl Sequence {
-    async fn from_request(req: Request, tokenizer: &dyn Tokenizer) -> Self {
+    async fn from_request(req: Request, tokenizer: &Box<dyn Tokenizer + Send>) -> Self {
         let tokens = tokenizer.tokenize(&req.prompt).await;
         let input_tokens = tokens.into_iter().map(|t| t.token_id).collect();
 
@@ -35,6 +32,7 @@ impl Sequence {
         }
     }
 
+    // Concert sequence to engine task
     fn to_engine_task(&self) -> EngineTask {
         match self.state {
             SequenceState::WaitingPrefill => EngineTask::Prefill {
@@ -52,12 +50,12 @@ impl Sequence {
 }
 
 pub struct Scheduler {
-    request_rx: Receiver<Request>,
-
-    engine_cmd_tx: Sender<EngineCommand>,
-    engine_result_rx: Receiver<EngineResult>,
-
-    sequences: HashMap<RequestId, Sequence>,
+    pub request_rx: Receiver<Request>,
+    pub engine_cmd_tx: Sender<EngineCommand>,
+    pub engine_result_rx: Receiver<EngineResult>,
+    pub sequences: HashMap<RequestId, Sequence>,
+    pub tokenizer: Box<dyn Tokenizer + Send>,
+    shutdown_rx: Receiver<()>,
 }
 
 impl Scheduler {
@@ -65,33 +63,44 @@ impl Scheduler {
         request_rx: Receiver<Request>,
         engine_cmd_tx: Sender<EngineCommand>,
         engine_result_rx: Receiver<EngineResult>,
+        shutdown_rx: Receiver<()>,
+        tokenizer: Box<dyn Tokenizer + Send + Sync>,
     ) -> Self {
         Scheduler {
             request_rx,
             engine_cmd_tx,
             engine_result_rx,
             sequences: HashMap::new(),
+            tokenizer,
+            shutdown_rx,
         }
     }
 
-    pub async fn run(mut self, tokenizer: &dyn Tokenizer) {
+    pub async fn run(mut self) -> Self {
         loop {
             tokio::select! {
+                biased;
+
+                Some(()) = self.shutdown_rx.recv() => {
+                    break;
+                }
+
                 Some(req) = self.request_rx.recv() => {
-                    let seq = Sequence::from_request(req, tokenizer).await;
+                    let seq = Sequence::from_request(req, &self.tokenizer).await;
                     self.sequences.insert(seq.request_id, seq);
                 }
 
                 Some(result) = self.engine_result_rx.recv() => {
-                    self.handle_engine_result(result, tokenizer).await;
+                    self.handle_engine_result(result).await;
                 }
             }
 
             self.schedule().await;
         }
+        self
     }
 
-    async fn handle_engine_result(&mut self, result: EngineResult, tokenizer: &dyn Tokenizer) {
+    async fn handle_engine_result(&mut self, result: EngineResult) {
         let EngineResult::StepOutput { outputs } = result else {
             return;
         };
@@ -109,7 +118,7 @@ impl Scheduler {
             seq.output_tokens.push(output.token);
             seq.kv_cache = Some(output.kv);
 
-            let eos_token_id = tokenizer.eos_token_id();
+            let eos_token_id = self.tokenizer.eos_token_id();
             let max_tokens = seq.sampling_params.max_tokens;
 
             if output.token == eos_token_id || seq.output_tokens.len() >= max_tokens {
@@ -123,6 +132,7 @@ impl Scheduler {
     async fn schedule(&mut self) {
         let mut tasks = Vec::new();
 
+        // Push waiting tasks to engine
         for seq in self.sequences.values() {
             if matches!(
                 seq.state,
@@ -136,6 +146,7 @@ impl Scheduler {
             return;
         }
 
+        // Manage SequenceState
         for seq in self.sequences.values_mut() {
             if matches!(
                 seq.state,

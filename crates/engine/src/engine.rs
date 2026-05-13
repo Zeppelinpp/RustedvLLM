@@ -28,17 +28,27 @@ impl MockTokenizer {
 
 #[async_trait]
 impl protocol::types::Tokenizer for MockTokenizer {
-    async fn decode(&self, _input_ids: &Vec<Token>) -> String {
-        todo!()
+    async fn decode(&self, input_ids: &Vec<Token>) -> String {
+        // TODO:implement real decode from pytho lib
+        // Currently return input_ids as String
+        input_ids
+            .iter()
+            .map(|t| (t.token_id as u8) as char)
+            .collect()
     }
-    async fn tokenize(&self, _prompt: &str) -> Vec<Token> {
-        todo!()
+    async fn tokenize(&self, prompt: &str) -> Vec<Token> {
+        // TODO: implement real tokenization from python lib
+        prompt
+            .bytes()
+            .map(|b| Token { token_id: b as u32 })
+            .collect()
     }
     fn eos_token_id(&self) -> TokenId {
         self.vocab.eos_token_id
     }
 }
 
+#[derive(Clone)]
 pub struct MockEngine {
     pub id: String,
     pub model: MockModel,
